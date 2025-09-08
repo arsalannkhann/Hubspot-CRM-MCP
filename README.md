@@ -1,6 +1,6 @@
-# HubSpot CRM MCP (Model Context Protocol) 🚀
+# HubSpot CRM MCP Server 🚀
 
-A complete HubSpot CRM integration using Python that demonstrates creating contacts, deals, and associations through the HubSpot API.
+A complete Model Context Protocol (MCP) server for HubSpot CRM integration. Provides tools for creating contacts, deals, associations, and retrieving CRM data through the MCP protocol.
 
 ## 🔧 Setup Complete
 
@@ -13,35 +13,46 @@ A complete HubSpot CRM integration using Python that demonstrates creating conta
 ### 📂 Project Structure:
 ```
 Hubspot-CRM-MCP/
-├── hubspot-env/           # Virtual environment
-├── mcp.py                 # Main MCP script (WORKING!)
-├── demo.py                # Interactive demo script  
-├── test_connection.py     # API connection tester
-├── .env                   # Your HubSpot credentials
-├── .gitignore            # Protects sensitive files
-└── README.md             # This file
+├── hubspot-env/              # Virtual environment
+├── hubspot_mcp_server.py     # Main MCP Server (PRODUCTION READY!)
+├── old_demo_mcp.py          # Legacy demo script
+├── test_simple.py           # MCP server test script
+├── test_connection.py       # API connection tester
+├── mcp_config.json          # MCP server configuration
+├── .env                     # Your HubSpot credentials
+├── .gitignore              # Protects sensitive files
+└── README.md               # This file
 ```
 
-## 🎯 Main Features
+## 🎯 MCP Tools Available
 
-### Core Functions:
-- **`create_contact()`** - Creates new contacts with email, name, phone
-- **`create_deal()`** - Creates deals with name, amount, pipeline, stage
-- **`associate_records()`** - Links contacts to deals (uses legacy API for reliability)
-- **`get_deal_with_associations()`** - Retrieves deals with linked contacts
-- **`handle_api_error()`** - Centralized error handling
+### Core MCP Tools:
+- **`create_contact`** - Creates new contacts with email, name, phone, company
+- **`create_deal`** - Creates deals with name, amount, pipeline, stage
+- **`associate_contact_deal`** - Links contacts to deals
+- **`get_deal`** - Retrieves deals with optional associations
+- **`get_contact`** - Retrieves contact information
+- **`search_contacts`** - Search contacts by email
 
-### API Compatibility:
-- Uses **Legacy Associations API** (v3) for reliable contact-deal linking
-- Automatic unique ID generation to prevent conflicts
-- Proper error handling for rate limits and validation
+### MCP Server Features:
+- **Proper MCP Protocol** - Full compliance with MCP specification
+- **JSON Schema Validation** - Type-safe tool parameters
+- **Error Handling** - Structured error responses
+- **Async Support** - Non-blocking operations
+- **Legacy API Compatibility** - Uses reliable v3 associations API
 
 ## 🚀 Usage
 
-### Run the Main Demo:
+### Run the MCP Server:
 ```bash
 source hubspot-env/bin/activate
-python mcp.py
+python hubspot_mcp_server.py
+```
+
+### Test MCP Server:
+```bash
+source hubspot-env/bin/activate
+python test_simple.py
 ```
 
 ### Test API Connection:
@@ -50,15 +61,26 @@ source hubspot-env/bin/activate
 python test_connection.py
 ```
 
+### MCP Client Integration:
+Use the `mcp_config.json` file to configure MCP clients to connect to this server.
+
 ## 📊 Recent Test Results
 
-**Last successful run:**
+**MCP Server Test Results:**
 ```
-🚀 HubSpot CRM MCP - Starting Demo
-✅ Contact created: MCP Demo (ID: 238253631211)
-✅ Deal created: MCP Demo Deal - 1757285566 (ID: 157169349361) 
-🔗 Associated contacts 238253631211 → deals 157169349361
-📊 MCP Status: Ready for production use!
+🧪 Testing HubSpot MCP Server
+1️⃣ Creating contact...
+✅ Contact created: 238651848393
+2️⃣ Creating deal...
+✅ Deal created: 157307868899
+3️⃣ Creating association...
+✅ Association created
+4️⃣ Retrieving deal...
+✅ Deal retrieved: MCP Test Deal 1757326784
+   Associated contacts: 1
+
+🎉 All tests passed!
+📊 Summary: Contact 238651848393 ↔ Deal 157307868899
 ```
 
 ## 🔑 Required HubSpot Scopes
@@ -76,14 +98,23 @@ Your HubSpot Private App needs these permissions:
 4. **Unique Data**: Auto-generated timestamps prevent duplicate conflicts
 5. **Error Handling**: Improved exception handling across all functions
 
-## 🎉 Status: Production Ready!
+## 🎉 Status: MCP Server Production Ready!
 
-The MCP implementation is fully functional and ready for:
-- Integration with larger applications
-- Batch processing of contacts/deals
-- Custom CRM workflows
-- Data synchronization tasks
+The HubSpot MCP Server is fully functional and ready for:
+- **MCP Client Integration** - Works with any MCP-compatible client
+- **Tool-based CRM Operations** - All core CRM functions available as tools
+- **Structured Data Responses** - JSON-formatted responses with success/error handling
+- **Async Operations** - Non-blocking server architecture
+- **Production Deployment** - Ready for containerization and scaling
+
+### Available MCP Tools:
+1. `create_contact` - Create new contacts
+2. `create_deal` - Create new deals
+3. `associate_contact_deal` - Link contacts and deals
+4. `get_deal` - Retrieve deal information
+5. `get_contact` - Retrieve contact information
+6. `search_contacts` - Search for contacts
 
 ---
-**Last Updated**: September 7, 2025  
-**Status**: ✅ All systems operational
+**Last Updated**: September 8, 2025  
+**Status**: ✅ MCP Server operational and tested
