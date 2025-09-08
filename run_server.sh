@@ -31,4 +31,4 @@ echo "Server ready! Connect your MCP client to this server."
 echo "Use Ctrl+C to stop the server."
 echo ""
 
-python hubspot_mcp_server.py
+python hubspot_mcp.py

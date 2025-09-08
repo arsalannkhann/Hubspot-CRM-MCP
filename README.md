@@ -14,7 +14,7 @@ A complete Model Context Protocol (MCP) server for HubSpot CRM integration. Prov
 ```
 Hubspot-CRM-MCP/
 ├── hubspot-env/              # Virtual environment
-├── hubspot_mcp_server.py     # Main MCP Server (PRODUCTION READY!)
+├── hubspot_mcp.py            # Main MCP Server (WORKING WITH CURSOR!)
 ├── old_demo_mcp.py          # Legacy demo script
 ├── test_simple.py           # MCP server test script
 ├── test_connection.py       # API connection tester
@@ -45,8 +45,10 @@ Hubspot-CRM-MCP/
 
 ### Run the MCP Server:
 ```bash
+./run_server.sh
+# OR manually:
 source hubspot-env/bin/activate
-python hubspot_mcp_server.py
+python hubspot_mcp.py
 ```
 
 ### Test MCP Server:

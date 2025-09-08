@@ -1,12 +1,8 @@
 {
   "mcpServers": {
     "hubspot-crm": {
-      "command": "python",
-      "args": ["hubspot_mcp_server.py"],
-      "cwd": "/Users/arsalankhan/Documents/GitHub/Hubspot-CRM-MCP",
-      "env": {
-        "PYTHON_PATH": "/Users/arsalankhan/Documents/GitHub/Hubspot-CRM-MCP/hubspot-env/bin/python"
-      }
+      "command": "/Users/arsalankhan/Documents/GitHub/Hubspot-CRM-MCP/hubspot-env/bin/python",
+      "args": ["/Users/arsalankhan/Documents/GitHub/Hubspot-CRM-MCP/hubspot_mcp.py"]
     }
   }
 }
