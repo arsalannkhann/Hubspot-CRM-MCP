@@ -47,6 +47,8 @@ class LLMClient:
             self._init_claude()
         elif self.provider == "llama3":
             self._init_llama3()
+        elif self.provider == "theta":
+            self._init_theta()
         else:
             logger.warning(f"Unknown provider {self.provider}, using mock client")
             self.client = MockLLMClient()
@@ -108,6 +110,34 @@ class LLMClient:
         except Exception as e:
             logger.error(f"Failed to connect to local LLM: {e}")
             logger.info("Make sure Ollama is running: ollama serve")
+            self.client = MockLLMClient()
+    
+    def _init_theta(self):
+        """Initialize Theta Sales LLM client (AWS-hosted)"""
+        try:
+            from theta_llm_integration import ThetaLLMClient
+            
+            theta_endpoint = os.getenv("THETA_ENDPOINT_URL")
+            theta_api_key = os.getenv("THETA_API_KEY")
+            
+            if not theta_endpoint:
+                logger.warning("Theta endpoint not configured, using mock client")
+                self.client = MockLLMClient()
+                return
+            
+            # Wrap Theta client to match our interface
+            theta_client = ThetaLLMClient(
+                endpoint_url=theta_endpoint,
+                api_key=theta_api_key,
+                use_api_gateway=True  # Default to API Gateway
+            )
+            self.client = ThetaClientWrapper(theta_client)
+            logger.info("Theta Sales LLM client initialized")
+        except ImportError:
+            logger.error("Theta integration module not found")
+            self.client = MockLLMClient()
+        except Exception as e:
+            logger.error(f"Failed to initialize Theta: {e}")
             self.client = MockLLMClient()
     
     async def query(self, prompt: str, **kwargs) -> str:
@@ -272,6 +302,34 @@ class Llama3Client(BaseLLMClient):
         except Exception as e:
             logger.error(f"Llama3 query failed: {e}")
             return f"Error: {str(e)}"
+
+class ThetaClientWrapper(BaseLLMClient):
+    """Wrapper for Theta Sales LLM to match our interface"""
+    
+    def __init__(self, theta_client):
+        self.theta = theta_client
+    
+    async def query(self, prompt: str, **kwargs) -> str:
+        """Query Theta Sales LLM"""
+        try:
+            return await self.theta.query(prompt, **kwargs)
+        except Exception as e:
+            logger.error(f"Theta query failed: {e}")
+            return f"Error: {str(e)}"
+    
+    async def query_structured(self, prompt: str, schema: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        """Query Theta and get structured response"""
+        try:
+            # Theta is fine-tuned for sales, so it understands structured outputs well
+            structured_prompt = f"{prompt}\n\nRespond with JSON matching this schema: {json.dumps(schema)}"
+            response = await self.theta.query(structured_prompt, **kwargs)
+            return json.loads(response)
+        except json.JSONDecodeError:
+            # If Theta doesn't return valid JSON, wrap the response
+            return {"response": response, "provider": "theta"}
+        except Exception as e:
+            logger.error(f"Theta structured query failed: {e}")
+            return {"error": str(e)}
 
 # ============================================
 # HELPER FUNCTIONS

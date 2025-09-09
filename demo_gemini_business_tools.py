@@ -10,14 +10,24 @@ import os
 from datetime import datetime
 
 # Configure Gemini
-os.environ["GEMINI_API_KEY"] = "AIzaSyB8vG8_hcvZvVMp6ztVpoI4VQC1Z2Ww4lo"
+# Load from environment variables (never hardcode API keys!)
+from dotenv import load_dotenv
+load_dotenv()
+
+# Set LLM provider
 os.environ["LLM_PROVIDER"] = "gemini"
 
 # Import Gemini
 import google.generativeai as genai
 
-# Configure API
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+# Configure API with key from .env file
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    print("⚠️ GEMINI_API_KEY not found in .env file")
+    print("Please add: GEMINI_API_KEY=your-key-here to .env")
+    exit(1)
+
+genai.configure(api_key=GEMINI_API_KEY)
 
 class BusinessAssistant:
     """AI-powered business assistant using Gemini"""
