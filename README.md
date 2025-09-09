@@ -1,27 +1,42 @@
-# HubSpot CRM MCP Server 🚀
+# Business Tools MCP Server with Gemini AI 🚀
 
-A complete Model Context Protocol (MCP) server for HubSpot CRM integration. Provides tools for creating contacts, deals, associations, and retrieving CRM data through the MCP protocol.
+A comprehensive MCP (Model Context Protocol) server providing 10 essential business tools, powered by Google's Gemini AI for intelligent orchestration. This LLM-agnostic system works with any AI model while featuring deep Gemini integration.
 
-## 🔧 Setup Complete
+## 🌟 Features
 
-### ✅ What's Working:
-- **Python Virtual Environment**: `hubspot-env/` 
-- **Dependencies Installed**: `hubspot-api-client` v12.0.0 & `python-dotenv`
-- **API Authentication**: HubSpot Private App token configured
-- **SSL Certificates**: Fixed for macOS compatibility
+### 🛠️ 10 Business Tools Available:
+1. **Web Search** - Search the web using SerpAPI/Google Custom Search
+2. **Database Query** - Query PostgreSQL/MySQL/SQLite databases
+3. **CRM Operations** - HubSpot & Salesforce integration
+4. **Data Enrichment** - Clearbit & People Data Labs APIs
+5. **Calendar Management** - Google Calendar & Outlook integration
+6. **Twilio Communication** - SMS, Voice, WhatsApp messaging
+7. **Email Services** - SendGrid & Mailgun transactional emails
+8. **Stripe Payments** - Payment processing & subscriptions
+9. **Docs/Knowledge Base** - Notion & Google Drive integration
+10. **Social Media** - LinkedIn & Twitter/X posting
 
-### 📂 Project Structure:
+### 🤖 Gemini AI Integration:
+- **Intelligent Tool Selection** - Gemini analyzes requests and selects appropriate tools
+- **Action Planning** - Creates step-by-step execution plans
+- **Priority Assessment** - Determines task urgency
+- **Natural Language Processing** - Understands complex business requests
+
+### 📂 Clean Project Structure:
 ```
 Hubspot-CRM-MCP/
-├── hubspot-env/              # Virtual environment
-├── hubspot_mcp.py            # Main MCP Server (WORKING WITH CURSOR!)
-├── old_demo_mcp.py          # Legacy demo script
-├── test_simple.py           # MCP server test script
-├── test_connection.py       # API connection tester
-├── mcp_config.json          # MCP server configuration
-├── .env                     # Your HubSpot credentials
-├── .gitignore              # Protects sensitive files
-└── README.md               # This file
+├── business_tools_mcp.py        # Main MCP server with 10 tools
+├── demo_gemini_business_tools.py # Gemini AI demo
+├── hubspot_mcp.py               # Original HubSpot MCP server
+├── config.py                    # Centralized configuration
+├── llm_client.py                # LLM provider abstraction
+├── .env                         # Your API keys (Gemini configured!)
+├── .env.example                 # Template for environment variables
+├── requirements.txt             # Python dependencies
+├── mcp_config.json             # MCP client configuration
+├── run_server.sh               # Server launcher script
+├── WARP.md                     # Development documentation
+└── README.md                   # This file
 ```
 
 ## 🎯 MCP Tools Available
