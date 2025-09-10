@@ -1896,126 +1896,25 @@ async def docs_operation_tool(args: Dict[str, Any]) -> List[types.TextContent]:
         })
     )]
 
-# Tool 10: Social Media Posting
+# Tool 10: Social Media Posting (Twitter/X only)
 async def social_media_post_tool(args: Dict[str, Any]) -> List[types.TextContent]:
-    """Post to social media platforms"""
+    """Post to Twitter/X social media platform"""
     platform = args.get("platform")
     content = args.get("content")
+    dry_run = args.get("dry_run", False)  # For testing without posting
     
     if not platform or not content:
         return [types.TextContent(
             type="text",
             text=json.dumps({
                 "error": "Platform and content are required",
-                "tool": "social_media_post"
+                "tool": "social_media_post",
+                "supported_platforms": ["twitter", "x"]
             })
         )]
     
-    if platform == "linkedin":
-        if not LINKEDIN_ACCESS_TOKEN:
-            return [types.TextContent(
-                type="text",
-                text=json.dumps({
-                    "error": "LinkedIn not configured. Please set LINKEDIN_ACCESS_TOKEN",
-                    "tool": "social_media_post"
-                })
-            )]
-        
-        try:
-            # Get user profile first
-            async with aiohttp.ClientSession() as session:
-                headers = {
-                    "Authorization": f"Bearer {LINKEDIN_ACCESS_TOKEN}",
-                    "Content-Type": "application/json"
-                }
-                
-                # Get user info for author
-                async with session.get(
-                    "https://api.linkedin.com/v2/me",
-                    headers=headers
-                ) as response:
-                    if response.status != 200:
-                        # Try to refresh token if expired
-                        error_text = await response.text()
-                        logger.error(f"LinkedIn auth failed: {error_text}")
-                        
-                        # Attempt token refresh if we have refresh token
-                        if LINKEDIN_CLIENT_ID and LINKEDIN_CLIENT_SECRET:
-                            # This would require implementing OAuth refresh flow
-                            return [types.TextContent(
-                                type="text",
-                                text=json.dumps({
-                                    "error": "LinkedIn token expired. Please refresh your access token.",
-                                    "tool": "social_media_post",
-                                    "status_code": response.status
-                                })
-                            )]
-                        
-                        return [types.TextContent(
-                            type="text",
-                            text=json.dumps({
-                                "error": f"LinkedIn authentication failed: {response.status}",
-                                "tool": "social_media_post"
-                            })
-                        )]
-                    
-                    user_data = await response.json()
-                    person_urn = f"urn:li:person:{user_data['id']}"
-                
-                # Create post
-                post_data = {
-                    "author": person_urn,
-                    "lifecycleState": "PUBLISHED",
-                    "specificContent": {
-                        "com.linkedin.ugc.ShareContent": {
-                            "shareCommentary": {
-                                "text": content
-                            },
-                            "shareMediaCategory": "NONE"
-                        }
-                    },
-                    "visibility": {
-                        "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"
-                    }
-                }
-                
-                async with session.post(
-                    "https://api.linkedin.com/v2/ugcPosts",
-                    headers=headers,
-                    json=post_data
-                ) as response:
-                    if response.status == 201:
-                        post_response = await response.json()
-                        return [types.TextContent(
-                            type="text",
-                            text=json.dumps({
-                                "success": True,
-                                "platform": "linkedin",
-                                "post_id": post_response.get("id"),
-                                "status": "published"
-                            })
-                        )]
-                    else:
-                        error_text = await response.text()
-                        return [types.TextContent(
-                            type="text",
-                            text=json.dumps({
-                                "error": f"LinkedIn post failed: {error_text}",
-                                "tool": "social_media_post"
-                            })
-                        )]
-                        
-        except Exception as e:
-            logger.error(f"LinkedIn post failed: {e}")
-            return [types.TextContent(
-                type="text",
-                text=json.dumps({
-                    "error": f"LinkedIn post failed: {str(e)}",
-                    "tool": "social_media_post"
-                })
-            )]
-    
-    elif platform == "twitter":
+    # Only support Twitter/X
+    if platform.lower() in ["twitter", "x"]:
         if not TWITTER_BEARER_TOKEN:
             return [types.TextContent(
                 type="text",
@@ -2026,21 +1925,99 @@ async def social_media_post_tool(args: Dict[str, Any]) -> List[types.TextContent
             )]
         
         try:
-            # Twitter v2 API
-            client = tweepy.Client(bearer_token=TWITTER_BEARER_TOKEN)
+            # Twitter v2 API with enhanced error handling
+            client = tweepy.Client(
+                bearer_token=TWITTER_BEARER_TOKEN,
+                consumer_key=TWITTER_API_KEY if TWITTER_API_KEY else None,
+                consumer_secret=TWITTER_API_SECRET if TWITTER_API_SECRET else None,
+                wait_on_rate_limit=True
+            )
             
+            # Dry-run mode for testing
+            if args.get("dry_run", False):
+                try:
+                    user = client.get_me()
+                    username = user.data.username if user and user.data and hasattr(user.data, 'username') else None
+                except:
+                    username = None
+                
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "success": True,
+                        "platform": "twitter",
+                        "dry_run": True,
+                        "message": "Credentials validated (no post made)",
+                        "content_preview": content[:280],
+                        "character_count": len(content),
+                        "within_limit": len(content) <= 280,
+                        "authenticated_user": username if username else "Bearer token authenticated"
+                    })
+                )]
+            
+            # Check content length
+            if len(content) > 280:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": f"Tweet too long: {len(content)} characters (max 280)",
+                        "tool": "social_media_post",
+                        "content_preview": content[:280] + "..."
+                    })
+                )]
+            
+            # Post tweet
             response = client.create_tweet(text=content)
             
+            if response and response.data:
+                tweet_id = response.data.get('id')
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "success": True,
+                        "platform": "twitter",
+                        "tweet_id": tweet_id,
+                        "url": f"https://twitter.com/i/web/status/{tweet_id}",
+                        "content": content,
+                        "character_count": len(content)
+                    })
+                )]
+            else:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": "Tweet creation failed - no response data",
+                        "tool": "social_media_post"
+                    })
+                )]
+            
+        except tweepy.errors.Forbidden as e:
             return [types.TextContent(
                 type="text",
                 text=json.dumps({
-                    "success": True,
-                    "platform": "twitter",
-                    "tweet_id": response.data['id'],
-                    "text": response.data['text']
+                    "error": f"Twitter API forbidden: {str(e)}",
+                    "tool": "social_media_post",
+                    "hint": "Check app write permissions"
                 })
             )]
-            
+        except tweepy.errors.Unauthorized as e:
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": f"Twitter authentication failed: {str(e)}",
+                    "tool": "social_media_post",
+                    "hint": "Check TWITTER_BEARER_TOKEN"
+                })
+            )]
+        except tweepy.errors.TooManyRequests as e:
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": f"Twitter rate limit: {str(e)}",
+                    "tool": "social_media_post",
+                    "hint": "Wait before retrying"
+                })
+            )]
         except Exception as e:
             logger.error(f"Twitter post failed: {e}")
             return [types.TextContent(
@@ -2051,13 +2028,16 @@ async def social_media_post_tool(args: Dict[str, Any]) -> List[types.TextContent
                 })
             )]
     
-    return [types.TextContent(
-        type="text",
-        text=json.dumps({
-            "error": f"Unsupported platform: {platform}",
-            "tool": "social_media_post"
-        })
-    )]
+    else:
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({
+                "error": f"Unsupported platform: {platform}",
+                "tool": "social_media_post",
+                "supported_platforms": ["twitter", "x"],
+                "note": "Only Twitter/X is supported. LinkedIn has been removed."
+            })
+        )]
 
 async def cleanup_clients():
     """Clean up initialized clients"""
