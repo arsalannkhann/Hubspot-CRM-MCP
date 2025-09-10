@@ -1,6 +1,11 @@
 # Environment variables
 .env
 
+# Google credentials (sensitive)
+credentials.json
+google_calendar_token.pickle
+*.pickle
+
 # Python
 __pycache__/
 *.py[cod]

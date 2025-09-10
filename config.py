@@ -56,7 +56,9 @@ OUTLOOK_CLIENT_ID = os.getenv("OUTLOOK_CLIENT_ID", "")
 OUTLOOK_CLIENT_SECRET = os.getenv("OUTLOOK_CLIENT_SECRET", "")
 
 # 6. Twilio Communication
-TWILIO_SID = os.getenv("TWILIO_SID", "")
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
+TWILIO_API_KEY_SID = os.getenv("TWILIO_API_KEY_SID", "")
+TWILIO_API_KEY_SECRET = os.getenv("TWILIO_API_KEY_SECRET", "")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "")
 TWILIO_WHATSAPP_NUMBER = os.getenv("TWILIO_WHATSAPP_NUMBER", "")
@@ -122,7 +124,7 @@ def get_configured_tools():
         configured.append("enrich_data")
     if GOOGLE_CALENDAR_CREDENTIALS or OUTLOOK_CLIENT_ID:
         configured.append("calendar_operation")
-    if TWILIO_SID and TWILIO_AUTH_TOKEN:
+    if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
         configured.append("twilio_communication")
     if SENDGRID_KEY or MAILGUN_KEY:
         configured.append("send_email")

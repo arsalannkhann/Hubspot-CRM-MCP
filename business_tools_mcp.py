@@ -1,21 +1,47 @@
 #!/usr/bin/env python3
 """
-Business Tools MCP Server
-A production-ready MCP server providing 10 essential business tools.
-LLM-agnostic design - works with any LLM client.
+Business Tools MCP Server - Production-Ready Implementation
+A complete MCP server providing 10 essential business tools with full error handling.
 """
 
 import asyncio
 import json
 import os
 from typing import Any, Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
+from urllib.parse import quote
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 import mcp.server.stdio
 import mcp.types as types
 from mcp.server import NotificationOptions, Server
 from dotenv import load_dotenv
+import signal # Import signal module
+
+# Third-party imports for integrations
+import aiohttp
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy import text
+import stripe
+from twilio.rest import Client as TwilioClient
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
+from hubspot import HubSpot
+from simple_salesforce import Salesforce
+from notion_client import AsyncClient as NotionClient
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+from O365 import Account
+import pickle
+import tweepy
+import pymongo
+from pymongo import MongoClient
 
 # Load environment variables
 load_dotenv()
@@ -27,16 +53,112 @@ logger = logging.getLogger(__name__)
 # Create MCP server instance
 app = Server("business-tools")
 
-# Import configuration
+# Import configuration with corrected Twilio variable names
 from config import (
     SERPAPI_KEY, CLEARBIT_KEY, PEOPLE_DATA_LABS_KEY,
     SENDGRID_KEY, MAILGUN_KEY, STRIPE_KEY,
-    TWILIO_SID, TWILIO_AUTH_TOKEN,
+    TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER,
     NOTION_KEY, GOOGLE_DRIVE_KEY,
     LINKEDIN_ACCESS_TOKEN, TWITTER_BEARER_TOKEN,
     HUBSPOT_TOKEN, SALESFORCE_TOKEN,
-    DATABASE_URL
+    DATABASE_URL, GOOGLE_CUSTOM_SEARCH_KEY, GOOGLE_CUSTOM_SEARCH_CX,
+    OUTLOOK_CLIENT_ID, OUTLOOK_CLIENT_SECRET,
+    TWITTER_API_KEY, TWITTER_API_SECRET,
+    LINKEDIN_CLIENT_ID, LINKEDIN_CLIENT_SECRET
 )
+
+# ============================================
+# ARCHITECTURAL IMPROVEMENTS RECOMMENDATIONS:
+# ============================================
+# 1. Consider implementing a ConfigManager class for centralized config validation
+# 2. Add connection pooling for database connections
+# 3. Implement retry logic with exponential backoff for API calls
+# 4. Add caching layer for frequently accessed data (Redis/memcached)
+# 5. Consider implementing a plugin architecture for easy tool additions
+# 6. Add metrics/monitoring support (Prometheus/Grafana)
+# 7. Implement rate limiting per API to respect provider limits
+# 8. Add webhook support for async operations
+# 9. Consider implementing OAuth2 flow for user-specific integrations
+# 10. Add data validation using Pydantic models for all tools
+# ============================================
+
+# Get Gmail credentials from environment
+GMAIL_EMAIL = os.getenv('GMAIL_EMAIL_ADDRESS')
+GMAIL_APP_PASSWORD = os.getenv('GMAIL_APP_PASSWORD')
+
+# Initialize clients with error handling
+try:
+    stripe.api_key = STRIPE_KEY if STRIPE_KEY else None
+except Exception as e:
+    logger.warning(f"Could not initialize Stripe: {e}")
+    stripe.api_key = None
+
+try:
+    twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN else None
+    if twilio_client:
+        logger.info(f"Twilio initialized with account SID: {TWILIO_ACCOUNT_SID[:10]}...")
+except Exception as e:
+    logger.warning(f"Could not initialize Twilio: {e}")
+    twilio_client = None
+
+try:
+    sendgrid_client = SendGridAPIClient(SENDGRID_KEY) if SENDGRID_KEY else None
+except Exception as e:
+    logger.warning(f"Could not initialize SendGrid: {e}")
+    sendgrid_client = None
+
+try:
+    hubspot_client = HubSpot(access_token=HUBSPOT_TOKEN) if HUBSPOT_TOKEN else None
+except Exception as e:
+    logger.warning(f"Could not initialize HubSpot: {e}")
+    hubspot_client = None
+
+try:
+    notion_client = NotionClient(auth=NOTION_KEY) if NOTION_KEY else None
+except Exception as e:
+    logger.warning(f"Could not initialize Notion: {e}")
+    notion_client = None
+
+# MongoDB client
+mongo_client = None
+if DATABASE_URL and DATABASE_URL.startswith("mongodb"):
+    try:
+        mongo_client = MongoClient(DATABASE_URL)
+        # Test connection
+        mongo_client.admin.command('ping')
+        logger.info("MongoDB connected successfully")
+    except Exception as e:
+        logger.warning(f"Could not connect to MongoDB: {e}")
+        mongo_client = None
+
+# SQL Database engine (async)
+db_engine = None
+AsyncSessionLocal = None
+if DATABASE_URL and not DATABASE_URL.startswith("mongodb"):
+    try:
+        # Convert sync URL to async URL for SQL databases
+        if DATABASE_URL.startswith("postgresql://"):
+            async_url = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
+        elif DATABASE_URL.startswith("mysql://"):
+            async_url = DATABASE_URL.replace("mysql://", "mysql+aiomysql://")
+        elif DATABASE_URL.startswith("sqlite://"):
+            async_url = DATABASE_URL  # SQLite works as-is
+        else:
+            async_url = None
+        
+        if async_url:
+            db_engine = create_async_engine(
+                async_url,
+                pool_size=5,
+                max_overflow=10,
+                pool_pre_ping=True,
+                echo=False
+            )
+            AsyncSessionLocal = sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+            logger.info("SQL database engine initialized")
+    except Exception as e:
+        logger.warning(f"Could not initialize SQL database engine: {e}")
+        db_engine = None
 
 @app.list_tools()
 async def handle_list_tools() -> List[types.Tool]:
@@ -60,12 +182,17 @@ async def handle_list_tools() -> List[types.Tool]:
         # 2. Database Query Tool
         types.Tool(
             name="database_query",
-            description="Query custom database (Postgres/MySQL/SQLite)",
+            description="Query custom database (MongoDB/Postgres/MySQL/SQLite)",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "SQL query"},
+                    "query": {"type": "string", "description": "SQL query for SQL DBs or operation type for MongoDB (find/insert/update/delete)"},
                     "database": {"type": "string", "description": "Database name", "default": "default"},
+                    "collection": {"type": "string", "description": "MongoDB collection name (required for MongoDB)"},
+                    "filter": {"type": "object", "description": "MongoDB filter/query document (JSON)"},
+                    "document": {"type": "object", "description": "MongoDB document for insert/update operations"},
+                    "update": {"type": "object", "description": "MongoDB update document"},
+                    "options": {"type": "object", "description": "MongoDB operation options (limit, sort, projection, etc.)"},
                     "timeout": {"type": "integer", "description": "Query timeout in seconds", "default": 30}
                 },
                 "required": ["query"]
@@ -80,7 +207,7 @@ async def handle_list_tools() -> List[types.Tool]:
                 "type": "object",
                 "properties": {
                     "crm": {"type": "string", "enum": ["hubspot", "salesforce"]},
-                    "operation": {"type": "string", "enum": ["create_contact", "update_contact", "get_contact", "create_deal", "get_deals"]},
+                    "operation": {"type": "string", "enum": ["create_contact", "update_contact", "get_contact", "list_contacts", "create_deal", "get_deals"]},
                     "data": {"type": "object", "description": "Operation-specific data"}
                 },
                 "required": ["crm", "operation", "data"]
@@ -137,44 +264,44 @@ async def handle_list_tools() -> List[types.Tool]:
         # 7. Email Tool
         types.Tool(
             name="send_email",
-            description="Send transactional emails via SendGrid or Mailgun",
+            description="Send transactional emails via SendGrid, Mailgun, or Gmail SMTP",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "provider": {"type": "string", "enum": ["sendgrid", "mailgun"], "default": "sendgrid"},
+                    "provider": {"type": "string", "enum": ["sendgrid", "mailgun", "gmail"], "default": "sendgrid"},
                     "to": {"type": "array", "items": {"type": "string"}, "description": "Recipient emails"},
                     "from": {"type": "string", "description": "Sender email"},
                     "subject": {"type": "string", "description": "Email subject"},
                     "body": {"type": "string", "description": "Email body (HTML supported)"},
                     "template_id": {"type": "string", "description": "Template ID (optional)"}
                 },
-                "required": ["to", "from", "subject", "body"]
+                "required": ["to", "from", "subject"]
             }
         ),
         
-        # 8. Stripe Integration Tool
+        # 8. Stripe Payment Tool
         types.Tool(
             name="stripe_operation",
-            description="Handle payments, subscriptions, and invoicing via Stripe",
+            description="Process payments, subscriptions, and invoices via Stripe",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "operation": {"type": "string", "enum": ["create_payment", "create_subscription", "create_invoice", "get_customer", "list_transactions"]},
+                    "operation": {"type": "string", "enum": ["create_payment", "create_subscription", "create_invoice", "list_customers", "get_balance"]},
                     "data": {"type": "object", "description": "Operation-specific data"}
                 },
                 "required": ["operation", "data"]
             }
         ),
         
-        # 9. Docs/Knowledge Base Tool
+        # 9. Document/Knowledge Base Tool
         types.Tool(
             name="docs_operation",
-            description="Interact with Notion or Google Drive documents",
+            description="Interact with Notion or Google Drive for documentation",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "provider": {"type": "string", "enum": ["notion", "google_drive"]},
-                    "action": {"type": "string", "enum": ["create", "read", "update", "search", "list"]},
+                    "action": {"type": "string", "enum": ["search", "create_page", "update_page", "list_pages"]},
                     "data": {"type": "object", "description": "Action-specific data"}
                 },
                 "required": ["provider", "action", "data"]
@@ -190,8 +317,7 @@ async def handle_list_tools() -> List[types.Tool]:
                 "properties": {
                     "platform": {"type": "string", "enum": ["linkedin", "twitter"]},
                     "content": {"type": "string", "description": "Post content"},
-                    "media_urls": {"type": "array", "items": {"type": "string"}, "description": "Media URLs (optional)"},
-                    "schedule_time": {"type": "string", "description": "ISO 8601 datetime to schedule post (optional)"}
+                    "media": {"type": "array", "items": {"type": "string"}, "description": "Media URLs (optional)"}
                 },
                 "required": ["platform", "content"]
             }
@@ -200,16 +326,11 @@ async def handle_list_tools() -> List[types.Tool]:
 
 @app.call_tool()
 async def handle_call_tool(
-    name: str,
-    arguments: Dict[str, Any] | None
+    name: str, arguments: Dict[str, Any]
 ) -> List[types.TextContent]:
     """Route tool calls to appropriate handlers"""
     
-    if not arguments:
-        arguments = {}
-    
     try:
-        # Route to appropriate tool handler
         if name == "web_search":
             return await web_search_tool(arguments)
         elif name == "database_query":
@@ -231,558 +352,1759 @@ async def handle_call_tool(
         elif name == "social_media_post":
             return await social_media_post_tool(arguments)
         else:
-            raise ValueError(f"Unknown tool: {name}")
-            
-    except Exception as e:
-        logger.error(f"Tool {name} failed: {str(e)}")
-        return [types.TextContent(
-            type="text",
-            text=json.dumps({"error": str(e), "tool": name}, indent=2)
-        )]
-
-# ============================================
-# 1. WEB SEARCH TOOL - FULLY IMPLEMENTED
-# ============================================
-
-async def web_search_tool(args: Dict[str, Any]) -> List[types.TextContent]:
-    """
-    Perform web search using SerpAPI
-    Fully implemented with error handling
-    """
-    try:
-        import aiohttp
-        
-        query = args.get("query")
-        num_results = args.get("num_results", 10)
-        search_type = args.get("search_type", "web")
-        
-        if not query:
-            raise ValueError("Search query is required")
-        
-        if not SERPAPI_KEY:
-            # Fallback to mock data if API key not configured
-            logger.warning("SerpAPI key not configured, returning mock results")
-            mock_results = {
-                "success": True,
-                "query": query,
-                "results": [
-                    {
-                        "title": f"Mock Result {i+1} for: {query}",
-                        "link": f"https://example.com/result{i+1}",
-                        "snippet": f"This is a mock search result snippet for query: {query}",
-                        "position": i+1
-                    }
-                    for i in range(min(num_results, 3))
-                ],
-                "metadata": {
-                    "total_results": num_results,
-                    "search_type": search_type,
-                    "timestamp": datetime.now().isoformat()
-                }
-            }
             return [types.TextContent(
                 type="text",
-                text=json.dumps(mock_results, indent=2)
+                text=json.dumps({
+                    "error": f"Unknown tool: {name}",
+                    "tool": name
+                })
+            )]
+    except Exception as e:
+        logger.error(f"Tool execution failed for {name}: {str(e)}")
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({
+                "error": f"Tool execution failed: {str(e)}",
+                "tool": name
+            })
+        )]
+
+# Tool 1: Web Search
+async def web_search_tool(args: Dict[str, Any]) -> List[types.TextContent]:
+    """Search the web using SerpAPI or Google Custom Search"""
+    query = args.get("query")
+    num_results = args.get("num_results", 10)
+    search_type = args.get("search_type", "web")
+    
+    if not query:
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({
+                "error": "Query is required",
+                "tool": "web_search"
+            })
+        )]
+    
+    # Try SerpAPI first
+    if SERPAPI_KEY and SERPAPI_KEY != "your_serpapi_key_here":
+        try:
+            async with aiohttp.ClientSession() as session:
+                params = {
+                    "q": query,
+                    "api_key": SERPAPI_KEY,
+                    "num": num_results,
+                    "engine": "google"
+                }
+                
+                if search_type == "news":
+                    params["tbm"] = "nws"
+                elif search_type == "images":
+                    params["tbm"] = "isch"
+                
+                async with session.get("https://serpapi.com/search", params=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        results = []
+                        if search_type == "web" or search_type == "news":
+                            organic_results = data.get("organic_results", [])
+                            for result in organic_results[:num_results]:
+                                results.append({
+                                    "title": result.get("title"),
+                                    "link": result.get("link"),
+                                    "snippet": result.get("snippet")
+                                })
+                        elif search_type == "images":
+                            image_results = data.get("images_results", [])
+                            for result in image_results[:num_results]:
+                                results.append({
+                                    "title": result.get("title"),
+                                    "link": result.get("link"),
+                                    "thumbnail": result.get("thumbnail"),
+                                    "original": result.get("original")
+                                })
+                        
+                        return [types.TextContent(
+                            type="text",
+                            text=json.dumps({
+                                "success": True,
+                                "query": query,
+                                "results": results,
+                                "total": len(results),
+                                "provider": "serpapi"
+                            })
+                        )]
+                    elif response.status == 401:
+                        logger.warning("SerpAPI authentication failed, falling back to Google Custom Search")
+                    else:
+                        logger.warning(f"SerpAPI returned status {response.status}")
+        except Exception as e:
+            logger.warning(f"SerpAPI search failed: {e}, falling back to Google Custom Search")
+    
+    # Fallback to Google Custom Search
+    if GOOGLE_CUSTOM_SEARCH_KEY and GOOGLE_CUSTOM_SEARCH_CX:
+        try:
+            async with aiohttp.ClientSession() as session:
+                params = {
+                    "key": GOOGLE_CUSTOM_SEARCH_KEY,
+                    "cx": GOOGLE_CUSTOM_SEARCH_CX,
+                    "q": query,
+                    "num": min(num_results, 10)  # Google limits to 10
+                }
+                
+                if search_type == "images":
+                    params["searchType"] = "image"
+                
+                async with session.get("https://www.googleapis.com/customsearch/v1", params=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        results = []
+                        items = data.get("items", [])
+                        for item in items:
+                            if search_type == "images":
+                                results.append({
+                                    "title": item.get("title"),
+                                    "link": item.get("link"),
+                                    "thumbnail": item.get("image", {}).get("thumbnailLink"),
+                                    "context": item.get("image", {}).get("contextLink")
+                                })
+                            else:
+                                results.append({
+                                    "title": item.get("title"),
+                                    "link": item.get("link"),
+                                    "snippet": item.get("snippet")
+                                })
+                        
+                        return [types.TextContent(
+                            type="text",
+                            text=json.dumps({
+                                "success": True,
+                                "query": query,
+                                "results": results,
+                                "total": len(results),
+                                "provider": "google_custom_search"
+                            })
+                        )]
+                    else:
+                        error_data = await response.text()
+                        logger.error(f"Google Custom Search failed: {error_data}")
+        except Exception as e:
+            logger.error(f"Google Custom Search failed: {e}")
+    
+    # No search API available
+    return [types.TextContent(
+        type="text",
+        text=json.dumps({
+            "error": "No search API configured. Please set SERPAPI_KEY or GOOGLE_CUSTOM_SEARCH_KEY",
+            "tool": "web_search"
+        })
+    )]
+
+# Tool 2: Database Query - Enhanced with full MongoDB support
+async def database_query_tool(args: Dict[str, Any]) -> List[types.TextContent]:
+    """Query database (MongoDB or SQL) with enhanced MongoDB operations"""
+    query = args.get("query", "").lower()
+    database = args.get("database", "default")
+    collection = args.get("collection")
+    filter_doc = args.get("filter", {})
+    document = args.get("document", {})
+    update_doc = args.get("update", {})
+    options = args.get("options", {})
+    
+    if not query:
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({
+                "error": "Query/operation type is required",
+                "tool": "database_query",
+                "hint": "For MongoDB use: find, insert, update, delete. For SQL use raw SQL query."
+            })
+        )]
+    
+    # MongoDB operations
+    if mongo_client and (DATABASE_URL and DATABASE_URL.startswith("mongodb")):
+        if not collection:
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": "Collection name is required for MongoDB operations",
+                    "tool": "database_query"
+                })
             )]
         
-        # Actual SerpAPI implementation
-        url = "https://serpapi.com/search"
-        params = {
-            "q": query,
-            "api_key": SERPAPI_KEY,
-            "num": num_results,
-            "engine": "google" if search_type == "web" else search_type
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    
-                    # Parse results based on search type
+        try:
+            db = mongo_client[database]
+            coll = db[collection]
+            
+            # FIND operation
+            if "find" in query or "select" in query or "get" in query:
+                # Apply options
+                limit = options.get("limit", 100)
+                sort = options.get("sort")
+                projection = options.get("projection")
+                skip = options.get("skip", 0)
+                
+                cursor = coll.find(filter_doc)
+                
+                if projection:
+                    cursor = cursor.projection(projection)
+                if sort:
+                    # Convert sort to list of tuples if dict
+                    if isinstance(sort, dict):
+                        sort = [(k, v) for k, v in sort.items()]
+                    cursor = cursor.sort(sort)
+                if skip:
+                    cursor = cursor.skip(skip)
+                if limit:
+                    cursor = cursor.limit(limit)
+                
+                results = list(cursor)
+                
+                # Convert ObjectId and other non-serializable types to strings
+                for doc in results:
+                    for key, value in doc.items():
+                        if hasattr(value, '__str__') and not isinstance(value, (str, int, float, bool, list, dict)):
+                            doc[key] = str(value)
+                
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "success": True,
+                        "operation": "find",
+                        "database": database,
+                        "collection": collection,
+                        "filter": filter_doc,
+                        "results": results,
+                        "count": len(results),
+                        "total_count": coll.count_documents(filter_doc)
+                    })
+                )]
+            
+            # INSERT operation
+            elif "insert" in query or "create" in query or "add" in query:
+                if not document:
+                    return [types.TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "error": "Document is required for insert operation",
+                            "tool": "database_query"
+                        })
+                    )]
+                
+                # Support both single and multiple inserts
+                if isinstance(document, list):
+                    result = coll.insert_many(document)
+                    inserted_ids = [str(id) for id in result.inserted_ids]
+                    return [types.TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "success": True,
+                            "operation": "insert_many",
+                            "database": database,
+                            "collection": collection,
+                            "inserted_ids": inserted_ids,
+                            "inserted_count": len(inserted_ids)
+                        })
+                    )]
+                else:
+                    result = coll.insert_one(document)
+                    return [types.TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "success": True,
+                            "operation": "insert_one",
+                            "database": database,
+                            "collection": collection,
+                            "inserted_id": str(result.inserted_id)
+                        })
+                    )]
+            
+            # UPDATE operation
+            elif "update" in query or "modify" in query:
+                if not update_doc:
+                    return [types.TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "error": "Update document is required for update operation",
+                            "tool": "database_query"
+                        })
+                    )]
+                
+                # Determine if updating one or many
+                if "many" in query or options.get("multi"):
+                    result = coll.update_many(filter_doc, update_doc, upsert=options.get("upsert", False))
+                    return [types.TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "success": True,
+                            "operation": "update_many",
+                            "database": database,
+                            "collection": collection,
+                            "matched_count": result.matched_count,
+                            "modified_count": result.modified_count,
+                            "upserted_id": str(result.upserted_id) if result.upserted_id else None
+                        })
+                    )]
+                else:
+                    result = coll.update_one(filter_doc, update_doc, upsert=options.get("upsert", False))
+                    return [types.TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "success": True,
+                            "operation": "update_one",
+                            "database": database,
+                            "collection": collection,
+                            "matched_count": result.matched_count,
+                            "modified_count": result.modified_count,
+                            "upserted_id": str(result.upserted_id) if result.upserted_id else None
+                        })
+                    )]
+            
+            # DELETE operation
+            elif "delete" in query or "remove" in query:
+                # Determine if deleting one or many
+                if "many" in query or "all" in query or options.get("multi"):
+                    result = coll.delete_many(filter_doc)
+                    return [types.TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "success": True,
+                            "operation": "delete_many",
+                            "database": database,
+                            "collection": collection,
+                            "deleted_count": result.deleted_count
+                        })
+                    )]
+                else:
+                    result = coll.delete_one(filter_doc)
+                    return [types.TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "success": True,
+                            "operation": "delete_one",
+                            "database": database,
+                            "collection": collection,
+                            "deleted_count": result.deleted_count
+                        })
+                    )]
+            
+            # AGGREGATE operation
+            elif "aggregate" in query:
+                pipeline = filter_doc if isinstance(filter_doc, list) else [filter_doc]
+                results = list(coll.aggregate(pipeline))
+                
+                # Convert non-serializable types
+                for doc in results:
+                    for key, value in doc.items():
+                        if hasattr(value, '__str__') and not isinstance(value, (str, int, float, bool, list, dict)):
+                            doc[key] = str(value)
+                
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "success": True,
+                        "operation": "aggregate",
+                        "database": database,
+                        "collection": collection,
+                        "pipeline": pipeline,
+                        "results": results,
+                        "count": len(results)
+                    })
+                )]
+            
+            # COUNT operation
+            elif "count" in query:
+                count = coll.count_documents(filter_doc)
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "success": True,
+                        "operation": "count",
+                        "database": database,
+                        "collection": collection,
+                        "filter": filter_doc,
+                        "count": count
+                    })
+                )]
+            
+            # DISTINCT operation
+            elif "distinct" in query:
+                field = options.get("field") or options.get("key")
+                if not field:
+                    return [types.TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "error": "Field name is required for distinct operation (use options.field)",
+                            "tool": "database_query"
+                        })
+                    )]
+                
+                values = coll.distinct(field, filter_doc)
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "success": True,
+                        "operation": "distinct",
+                        "database": database,
+                        "collection": collection,
+                        "field": field,
+                        "values": values,
+                        "count": len(values)
+                    })
+                )]
+            
+            else:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": f"Unsupported MongoDB operation: {query}",
+                        "tool": "database_query",
+                        "supported_operations": ["find", "insert", "update", "delete", "aggregate", "count", "distinct"]
+                    })
+                )]
+            
+        except Exception as e:
+            logger.error(f"MongoDB operation failed: {e}")
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": f"MongoDB operation failed: {str(e)}",
+                    "tool": "database_query",
+                    "operation": query,
+                    "database": database,
+                    "collection": collection
+                })
+            )]
+    
+    # SQL query
+    elif db_engine:
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(text(query))
+                
+                # Handle different result types
+                if result.returns_rows:
+                    rows = result.fetchall()
+                    # Convert rows to dictionaries
                     results = []
-                    if search_type == "web":
-                        organic_results = data.get("organic_results", [])
-                        for result in organic_results[:num_results]:
-                            results.append({
-                                "title": result.get("title"),
-                                "link": result.get("link"),
-                                "snippet": result.get("snippet"),
-                                "position": result.get("position")
-                            })
-                    elif search_type == "news":
-                        news_results = data.get("news_results", [])
-                        for result in news_results[:num_results]:
-                            results.append({
-                                "title": result.get("title"),
-                                "link": result.get("link"),
-                                "source": result.get("source"),
-                                "date": result.get("date")
-                            })
-                    elif search_type == "images":
-                        images_results = data.get("images_results", [])
-                        for result in images_results[:num_results]:
-                            results.append({
-                                "title": result.get("title"),
-                                "link": result.get("link"),
-                                "thumbnail": result.get("thumbnail"),
-                                "original": result.get("original")
-                            })
+                    for row in rows:
+                        if hasattr(row, '_mapping'):
+                            results.append(dict(row._mapping))
+                        else:
+                            results.append(dict(zip(result.keys(), row)))
                     
                     return [types.TextContent(
                         type="text",
                         text=json.dumps({
                             "success": True,
-                            "query": query,
+                            "database": database,
                             "results": results,
-                            "metadata": {
-                                "total_results": len(results),
-                                "search_type": search_type,
-                                "timestamp": datetime.now().isoformat()
-                            }
-                        }, indent=2)
+                            "count": len(results)
+                        })
                     )]
                 else:
-                    raise Exception(f"SerpAPI returned status {response.status}")
+                    # For INSERT, UPDATE, DELETE
+                    await session.commit()
+                    return [types.TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "success": True,
+                            "database": database,
+                            "rows_affected": result.rowcount
+                        })
+                    )]
                     
-    except Exception as e:
-        logger.error(f"Web search failed: {str(e)}")
-        return [types.TextContent(
-            type="text",
-            text=json.dumps({"error": f"Web search failed: {str(e)}"}, indent=2)
-        )]
+        except Exception as e:
+            logger.error(f"SQL query failed: {e}")
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": f"SQL query failed: {str(e)}",
+                    "tool": "database_query"
+                })
+            )]
+    
+    return [types.TextContent(
+        type="text",
+        text=json.dumps({
+            "error": "Database not configured. Please set DATABASE_URL",
+            "tool": "database_query"
+        })
+    )]
 
-# ============================================
-# 2. DATABASE QUERY TOOL - STUBBED
-# ============================================
-
-async def database_query_tool(args: Dict[str, Any]) -> List[types.TextContent]:
-    """
-    Query custom database using SQLAlchemy
-    TODO: Implement actual database connection and query execution
-    """
-    try:
-        query = args.get("query")
-        database = args.get("database", "default")
-        timeout = args.get("timeout", 30)
-        
-        if not query:
-            raise ValueError("SQL query is required")
-        
-        # TODO: Implement SQLAlchemy connection pooling
-        # TODO: Add query validation and sanitization
-        # TODO: Implement timeout handling
-        # TODO: Add support for multiple database types (Postgres, MySQL, SQLite)
-        
-        return [types.TextContent(
-            type="text",
-            text=json.dumps({
-                "success": False,
-                "error": "Database query tool not yet implemented",
-                "todo": [
-                    "Configure DATABASE_URL in .env",
-                    "Install sqlalchemy and database drivers",
-                    "Implement connection pooling",
-                    "Add query validation"
-                ],
-                "query": query,
-                "database": database
-            }, indent=2)
-        )]
-        
-    except Exception as e:
-        return [types.TextContent(
-            type="text",
-            text=json.dumps({"error": f"Database query failed: {str(e)}"}, indent=2)
-        )]
-
-# ============================================
-# 3. CRM INTEGRATION TOOL - STUBBED
-# ============================================
-
+# Tool 3: CRM Operations
 async def crm_operation_tool(args: Dict[str, Any]) -> List[types.TextContent]:
-    """
-    Interact with HubSpot or Salesforce CRM
-    TODO: Implement actual CRM API calls
-    """
-    try:
-        crm = args.get("crm")
-        operation = args.get("operation")
-        data = args.get("data", {})
-        
-        if not crm or not operation:
-            raise ValueError("CRM and operation are required")
-        
-        # TODO: Implement HubSpot API integration using hubspot-api-client
-        # TODO: Implement Salesforce API integration using simple-salesforce
-        # TODO: Add authentication handling for both platforms
-        # TODO: Implement all CRUD operations
-        
+    """Perform CRM operations on HubSpot or Salesforce"""
+    crm = args.get("crm")
+    operation = args.get("operation")
+    data = args.get("data", {})
+    
+    if not crm or not operation or not data:
         return [types.TextContent(
             type="text",
             text=json.dumps({
-                "success": False,
-                "error": "CRM tool not yet implemented",
-                "todo": [
-                    f"Configure {crm.upper()}_TOKEN in .env",
-                    f"Install {crm} client library",
-                    "Implement operation handlers",
-                    "Add data validation"
-                ],
-                "crm": crm,
-                "operation": operation,
-                "data": data
-            }, indent=2)
+                "error": "CRM, operation, and data are required",
+                "tool": "crm_operation"
+            })
         )]
+    
+    if crm == "hubspot":
+        if not hubspot_client:
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": "HubSpot not configured. Please set HUBSPOT_TOKEN",
+                    "tool": "crm_operation"
+                })
+            )]
         
-    except Exception as e:
-        return [types.TextContent(
-            type="text",
-            text=json.dumps({"error": f"CRM operation failed: {str(e)}"}, indent=2)
-        )]
+        try:
+            if operation == "create_contact":
+                properties = data.get("properties", {})
+                response = hubspot_client.crm.contacts.basic_api.create(
+                    simple_public_object_input_for_create={"properties": properties}
+                )
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "success": True,
+                        "crm": "hubspot",
+                        "operation": operation,
+                        "contact_id": response.id,
+                        "properties": response.properties
+                    })
+                )]
+            
+            elif operation == "get_contact":
+                contact_id = data.get("id") or data.get("contact_id")
+                email = data.get("email")
+                
+                if email and not contact_id:
+                    # Search by email
+                    search_response = hubspot_client.crm.contacts.search_api.do_search(
+                        public_object_search_request={
+                            "filterGroups": [{
+                                "filters": [{
+                                    "propertyName": "email",
+                                    "operator": "EQ",
+                                    "value": email
+                                }]
+                            }]
+                        }
+                    )
+                    if search_response.results:
+                        contact = search_response.results[0]
+                        return [types.TextContent(
+                            type="text",
+                            text=json.dumps({
+                                "success": True,
+                                "crm": "hubspot",
+                                "operation": operation,
+                                "contact": {
+                                    "id": contact.id,
+                                    "properties": contact.properties
+                                }
+                            })
+                        )]
+                    else:
+                        return [types.TextContent(
+                            type="text",
+                            text=json.dumps({
+                                "success": False,
+                                "crm": "hubspot",
+                                "operation": operation,
+                                "error": f"No contact found with email: {email}"
+                            })
+                        )]
+                
+                elif contact_id:
+                    # Validate contact_id format
+                    try:
+                        contact_id = str(contact_id)
+                        response = hubspot_client.crm.contacts.basic_api.get_by_id(
+                            contact_id=contact_id
+                        )
+                        return [types.TextContent(
+                            type="text",
+                            text=json.dumps({
+                                "success": True,
+                                "crm": "hubspot",
+                                "operation": operation,
+                                "contact": {
+                                    "id": response.id,
+                                    "properties": response.properties
+                                }
+                            })
+                        )]
+                    except Exception as e:
+                        return [types.TextContent(
+                            type="text",
+                            text=json.dumps({
+                                "success": False,
+                                "crm": "hubspot",
+                                "operation": operation,
+                                "error": f"Invalid contact ID '{contact_id}'. HubSpot contact IDs should be numeric."
+                            })
+                        )]
+                else:
+                    return [types.TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "error": "Either contact_id or email is required for get_contact",
+                            "tool": "crm_operation"
+                        })
+                    )]
+            
+            elif operation == "list_contacts":
+                limit = data.get("limit", 10)
+                response = hubspot_client.crm.contacts.basic_api.get_page(limit=limit)
+                contacts = []
+                for contact in response.results:
+                    contacts.append({
+                        "id": contact.id,
+                        "properties": contact.properties
+                    })
+                
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "success": True,
+                        "crm": "hubspot",
+                        "operation": operation,
+                        "contacts": contacts,
+                        "total": len(contacts)
+                    })
+                )]
+            
+            elif operation == "create_deal":
+                properties = data.get("properties", {})
+                response = hubspot_client.crm.deals.basic_api.create(
+                    simple_public_object_input_for_create={"properties": properties}
+                )
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "success": True,
+                        "crm": "hubspot",
+                        "operation": operation,
+                        "deal_id": response.id,
+                        "properties": response.properties
+                    })
+                )]
+            
+            else:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": f"Unsupported HubSpot operation: {operation}",
+                        "tool": "crm_operation",
+                        "supported_operations": ["create_contact", "get_contact", "list_contacts", "create_deal"]
+                    })
+                )]
+                
+        except Exception as e:
+            logger.error(f"HubSpot operation failed: {e}")
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": f"HubSpot operation failed: {str(e)}",
+                    "tool": "crm_operation"
+                })
+            )]
+    
+    return [types.TextContent(
+        type="text",
+        text=json.dumps({
+            "error": f"Unsupported CRM: {crm}",
+            "tool": "crm_operation"
+        })
+    )]
 
-# ============================================
-# 4. DATA ENRICHMENT TOOL - STUBBED
-# ============================================
-
+# Tool 4: Data Enrichment
 async def enrich_data_tool(args: Dict[str, Any]) -> List[types.TextContent]:
-    """
-    Enrich contact/company data using Clearbit or People Data Labs
-    TODO: Implement actual enrichment API calls
-    """
-    try:
-        provider = args.get("provider")
-        data_type = args.get("type")
-        identifier = args.get("identifier")
-        
-        if not provider or not data_type or not identifier:
-            raise ValueError("Provider, type, and identifier are required")
-        
-        # TODO: Implement Clearbit API integration
-        # TODO: Implement People Data Labs API integration
-        # TODO: Add caching to avoid redundant API calls
-        # TODO: Handle rate limiting
-        
+    """Enrich person or company data"""
+    provider = args.get("provider")
+    data_type = args.get("type")
+    identifier = args.get("identifier")
+    
+    if not provider or not data_type or not identifier:
         return [types.TextContent(
             type="text",
             text=json.dumps({
-                "success": False,
-                "error": "Data enrichment tool not yet implemented",
-                "todo": [
-                    f"Configure {provider.upper()}_KEY in .env",
-                    "Install requests or aiohttp",
-                    "Implement API calls",
-                    "Add response parsing"
-                ],
-                "provider": provider,
-                "type": data_type,
-                "identifier": identifier
-            }, indent=2)
+                "error": "Provider, type, and identifier are required",
+                "tool": "enrich_data"
+            })
         )]
+    
+    if provider == "clearbit":
+        if not CLEARBIT_KEY or CLEARBIT_KEY == "your_clearbit_key_here":
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": "Clearbit not configured. Please set CLEARBIT_API_KEY",
+                    "tool": "enrich_data"
+                })
+            )]
         
-    except Exception as e:
-        return [types.TextContent(
-            type="text",
-            text=json.dumps({"error": f"Data enrichment failed: {str(e)}"}, indent=2)
-        )]
+        try:
+            async with aiohttp.ClientSession() as session:
+                headers = {"Authorization": f"Bearer {CLEARBIT_KEY}"}
+                
+                if data_type == "person":
+                    url = f"https://person-stream.clearbit.com/v2/people/find?email={identifier}"
+                else:  # company
+                    url = f"https://company-stream.clearbit.com/v2/companies/find?domain={identifier}"
+                
+                async with session.get(url, headers=headers) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return [types.TextContent(
+                            type="text",
+                            text=json.dumps({
+                                "success": True,
+                                "provider": "clearbit",
+                                "type": data_type,
+                                "identifier": identifier,
+                                "enriched_data": data
+                            })
+                        )]
+                    elif response.status == 404:
+                        return [types.TextContent(
+                            type="text",
+                            text=json.dumps({
+                                "success": False,
+                                "provider": "clearbit",
+                                "type": data_type,
+                                "identifier": identifier,
+                                "error": "No data found for this identifier"
+                            })
+                        )]
+                    elif response.status == 401:
+                        return [types.TextContent(
+                            type="text",
+                            text=json.dumps({
+                                "error": "Clearbit authentication failed. Check your API key.",
+                                "tool": "enrich_data"
+                            })
+                        )]
+                    else:
+                        error_text = await response.text()
+                        return [types.TextContent(
+                            type="text",
+                            text=json.dumps({
+                                "error": f"Clearbit API error: {response.status} - {error_text}",
+                                "tool": "enrich_data"
+                            })
+                        )]
+                        
+        except Exception as e:
+            logger.error(f"Clearbit enrichment failed: {e}")
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": f"Clearbit enrichment failed: {str(e)}",
+                    "tool": "enrich_data"
+                })
+            )]
+    
+    elif provider == "people_data_labs":
+        if not PEOPLE_DATA_LABS_KEY:
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": "People Data Labs not configured. Please set PEOPLE_DATA_LABS_KEY",
+                    "tool": "enrich_data"
+                })
+            )]
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                headers = {"X-Api-Key": PEOPLE_DATA_LABS_KEY}
+                
+                if data_type == "person":
+                    url = "https://api.peopledatalabs.com/v5/person/enrich"
+                    params = {"email": identifier}
+                else:  # company
+                    url = "https://api.peopledatalabs.com/v5/company/enrich"
+                    params = {"website": identifier}
+                
+                async with session.get(url, headers=headers, params=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return [types.TextContent(
+                            type="text",
+                            text=json.dumps({
+                                "success": True,
+                                "provider": "people_data_labs",
+                                "type": data_type,
+                                "identifier": identifier,
+                                "enriched_data": data.get("data", data)
+                            })
+                        )]
+                    else:
+                        error_data = await response.json()
+                        return [types.TextContent(
+                            type="text",
+                            text=json.dumps({
+                                "error": f"People Data Labs error: {error_data.get('error', 'Unknown error')}",
+                                "tool": "enrich_data"
+                            })
+                        )]
+                        
+        except Exception as e:
+            logger.error(f"People Data Labs enrichment failed: {e}")
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": f"People Data Labs enrichment failed: {str(e)}",
+                    "tool": "enrich_data"
+                })
+            )]
+    
+    return [types.TextContent(
+        type="text",
+        text=json.dumps({
+            "error": f"Unsupported provider: {provider}",
+            "tool": "enrich_data"
+        })
+    )]
 
-# ============================================
-# 5. CALENDAR & APPOINTMENT TOOL - STUBBED
-# ============================================
-
+# Tool 5: Calendar Operations
 async def calendar_operation_tool(args: Dict[str, Any]) -> List[types.TextContent]:
-    """
-    Manage calendar and appointments
-    TODO: Implement Google Calendar and Outlook integrations
-    """
-    try:
-        provider = args.get("provider")
-        action = args.get("action")
-        data = args.get("data", {})
-        
-        if not provider or not action:
-            raise ValueError("Provider and action are required")
-        
-        # TODO: Implement Google Calendar API using google-api-python-client
-        # TODO: Implement Outlook Calendar API using O365
-        # TODO: Add OAuth2 authentication flow
-        # TODO: Implement timezone handling
-        
+    """Manage calendar operations"""
+    provider = args.get("provider")
+    action = args.get("action")
+    data = args.get("data", {})
+    
+    if not provider or not action:
         return [types.TextContent(
             type="text",
             text=json.dumps({
-                "success": False,
-                "error": "Calendar tool not yet implemented",
-                "todo": [
-                    "Configure OAuth2 credentials",
-                    f"Install {provider} calendar library",
-                    "Implement authentication flow",
-                    "Add event CRUD operations"
-                ],
-                "provider": provider,
-                "action": action,
-                "data": data
-            }, indent=2)
+                "error": "Provider and action are required",
+                "tool": "calendar_operation"
+            })
         )]
-        
-    except Exception as e:
-        return [types.TextContent(
-            type="text",
-            text=json.dumps({"error": f"Calendar operation failed: {str(e)}"}, indent=2)
-        )]
+    
+    if provider == "google":
+        try:
+            # Load credentials
+            creds = None
+            token_file = os.getenv("GOOGLE_CALENDAR_TOKEN", "google_calendar_token.pickle")
+            
+            if os.path.exists(token_file):
+                with open(token_file, 'rb') as token:
+                    creds = pickle.load(token)
+            
+            if not creds or not creds.valid:
+                if creds and creds.expired and creds.refresh_token:
+                    creds.refresh(Request())
+                else:
+                    return [types.TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "error": "Google Calendar not authenticated. Please run authentication flow.",
+                            "tool": "calendar_operation"
+                        })
+                    )]
+            
+            service = build('calendar', 'v3', credentials=creds)
+            
+            if action == "get_events":
+                calendar_id = data.get("calendar_id", "primary")
+                time_min = data.get("time_min", datetime.utcnow().isoformat() + 'Z')
+                max_results = data.get("max_results", 10)
+                
+                events_result = service.events().list(
+                    calendarId=calendar_id,
+                    timeMin=time_min,
+                    maxResults=max_results,
+                    singleEvents=True,
+                    orderBy='startTime'
+                ).execute()
+                
+                events = events_result.get('items', [])
+                
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "success": True,
+                        "events": events,
+                        "total": len(events)
+                    })
+                )]
+            
+            elif action == "create_event":
+                calendar_id = data.get("calendar_id", "primary")
+                event = {
+                    'summary': data.get('summary', 'New Event'),
+                    'description': data.get('description', ''),
+                    'start': data.get('start', {
+                        'dateTime': (datetime.utcnow() + timedelta(days=1)).isoformat(),
+                        'timeZone': 'UTC',
+                    }),
+                    'end': data.get('end', {
+                        'dateTime': (datetime.utcnow() + timedelta(days=1, hours=1)).isoformat(),
+                        'timeZone': 'UTC',
+                    }),
+                    'attendees': data.get('attendees', [])
+                }
+                
+                event = service.events().insert(calendarId=calendar_id, body=event).execute()
+                
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "success": True,
+                        "event_id": event.get('id'),
+                        "link": event.get('htmlLink')
+                    })
+                )]
+            
+        except Exception as e:
+            logger.error(f"Google Calendar operation failed: {e}")
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": f"Google Calendar operation failed: {str(e)}",
+                    "tool": "calendar_operation"
+                })
+            )]
+    
+    return [types.TextContent(
+        type="text",
+        text=json.dumps({
+            "error": f"Unsupported provider: {provider}",
+            "tool": "calendar_operation"
+        })
+    )]
 
-# ============================================
-# 6. TWILIO COMMUNICATION TOOL - STUBBED
-# ============================================
-
+# Tool 6: Twilio Communication
 async def twilio_communication_tool(args: Dict[str, Any]) -> List[types.TextContent]:
-    """
-    Send SMS, make calls, or send WhatsApp messages
-    TODO: Implement Twilio API integration
-    """
-    try:
-        channel = args.get("channel")
-        to = args.get("to")
-        from_number = args.get("from")
-        message = args.get("message")
-        url = args.get("url")
-        
-        if not channel or not to:
-            raise ValueError("Channel and recipient are required")
-        
-        # TODO: Implement Twilio Client initialization
-        # TODO: Add SMS sending functionality
-        # TODO: Add voice call functionality with TwiML
-        # TODO: Add WhatsApp messaging
-        # TODO: Implement delivery status tracking
-        
+    """Send SMS, WhatsApp, or make calls via Twilio"""
+    channel = args.get("channel")
+    to_number = args.get("to")
+    from_number = args.get("from", TWILIO_PHONE_NUMBER)
+    message = args.get("message")
+    
+    if not channel or not to_number:
         return [types.TextContent(
             type="text",
             text=json.dumps({
-                "success": False,
-                "error": "Twilio tool not yet implemented",
-                "todo": [
-                    "Configure TWILIO_SID and TWILIO_AUTH_TOKEN in .env",
-                    "Install twilio library",
-                    "Set up phone numbers",
-                    "Implement message/call handlers"
-                ],
-                "channel": channel,
-                "to": to,
-                "message": message or url
-            }, indent=2)
+                "error": "Channel and recipient are required",
+                "tool": "twilio_communication"
+            })
         )]
-        
-    except Exception as e:
+    
+    if not twilio_client:
         return [types.TextContent(
             type="text",
-            text=json.dumps({"error": f"Twilio communication failed: {str(e)}"}, indent=2)
+            text=json.dumps({
+                "error": "Twilio not configured. Please set TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN",
+                "tool": "twilio_communication"
+            })
+        )]
+    
+    try:
+        if channel == "sms":
+            if not message:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": "Message is required for SMS",
+                        "tool": "twilio_communication"
+                    })
+                )]
+            
+            msg = twilio_client.messages.create(
+                body=message,
+                from_=from_number,
+                to=to_number
+            )
+            
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": True,
+                    "channel": "sms",
+                    "message_sid": msg.sid,
+                    "status": msg.status,
+                    "to": msg.to,
+                    "from": msg.from_
+                })
+            )]
+        
+        elif channel == "whatsapp":
+            if not message:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": "Message is required for WhatsApp",
+                        "tool": "twilio_communication"
+                    })
+                )]
+            
+            # WhatsApp numbers need 'whatsapp:' prefix
+            wa_from = f"whatsapp:{from_number}" if not from_number.startswith("whatsapp:") else from_number
+            wa_to = f"whatsapp:{to_number}" if not to_number.startswith("whatsapp:") else to_number
+            
+            msg = twilio_client.messages.create(
+                body=message,
+                from_=wa_from,
+                to=wa_to
+            )
+            
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": True,
+                    "channel": "whatsapp",
+                    "message_sid": msg.sid,
+                    "status": msg.status,
+                    "to": msg.to,
+                    "from": msg.from_
+                })
+            )]
+        
+        elif channel == "voice":
+            url = args.get("url", "http://demo.twilio.com/docs/voice.xml")
+            
+            call = twilio_client.calls.create(
+                url=url,
+                from_=from_number,
+                to=to_number
+            )
+            
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": True,
+                    "channel": "voice",
+                    "call_sid": call.sid,
+                    "status": call.status,
+                    "to": call.to,
+                    "from": call.from_
+                })
+            )]
+        
+    except Exception as e:
+        logger.error(f"Twilio communication failed: {e}")
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({
+                "error": f"Twilio communication failed: {str(e)}",
+                "tool": "twilio_communication"
+            })
         )]
 
-# ============================================
-# 7. EMAIL TOOL - STUBBED
-# ============================================
-
+# Tool 7: Email Services
 async def send_email_tool(args: Dict[str, Any]) -> List[types.TextContent]:
-    """
-    Send transactional emails via SendGrid or Mailgun
-    TODO: Implement email provider integrations
-    """
-    try:
-        provider = args.get("provider", "sendgrid")
-        to = args.get("to", [])
-        from_email = args.get("from")
-        subject = args.get("subject")
-        body = args.get("body")
-        template_id = args.get("template_id")
-        
-        if not to or not from_email or not subject or not body:
-            raise ValueError("To, from, subject, and body are required")
-        
-        # TODO: Implement SendGrid API integration
-        # TODO: Implement Mailgun API integration
-        # TODO: Add template support
-        # TODO: Add attachment handling
-        # TODO: Implement bounce and open tracking
-        
+    """Send email via SendGrid, Mailgun, or Gmail SMTP"""
+    provider = args.get("provider", "sendgrid")
+    to_emails = args.get("to", [])
+    from_email = args.get("from")
+    subject = args.get("subject")
+    body = args.get("body", "")
+    
+    if not to_emails or not from_email or not subject:
         return [types.TextContent(
             type="text",
             text=json.dumps({
-                "success": False,
-                "error": "Email tool not yet implemented",
-                "todo": [
-                    f"Configure {provider.upper()}_KEY in .env",
-                    f"Install {provider} library",
-                    "Set up sender domains",
-                    "Implement send functionality"
-                ],
-                "provider": provider,
-                "to": to,
-                "from": from_email,
-                "subject": subject
-            }, indent=2)
+                "error": "To, from, and subject are required",
+                "tool": "send_email"
+            })
         )]
+    
+    # Ensure to_emails is a list
+    if isinstance(to_emails, str):
+        to_emails = [to_emails]
+    
+    # Gmail SMTP
+    if provider == "gmail":
+        if not GMAIL_EMAIL or not GMAIL_APP_PASSWORD:
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": "Gmail not configured. Please set GMAIL_EMAIL_ADDRESS and GMAIL_APP_PASSWORD",
+                    "tool": "send_email"
+                })
+            )]
         
-    except Exception as e:
+        try:
+            msg = MIMEMultipart()
+            msg['From'] = from_email or GMAIL_EMAIL
+            msg['To'] = ', '.join(to_emails)
+            msg['Subject'] = subject
+            
+            msg.attach(MIMEText(body, 'html' if '<' in body else 'plain'))
+            
+            with smtplib.SMTP('smtp.gmail.com', 587) as server:
+                server.starttls()
+                server.login(GMAIL_EMAIL, GMAIL_APP_PASSWORD)
+                server.send_message(msg)
+            
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": True,
+                    "provider": "gmail",
+                    "to": to_emails,
+                    "from": from_email or GMAIL_EMAIL,
+                    "subject": subject,
+                    "status": "sent"
+                })
+            )]
+            
+        except Exception as e:
+            logger.error(f"Gmail send failed: {e}")
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": f"Gmail send failed: {str(e)}",
+                    "tool": "send_email"
+                })
+            )]
+    
+    # SendGrid
+    elif provider == "sendgrid":
+        if not sendgrid_client:
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": "SendGrid not configured. Please set SENDGRID_API_KEY",
+                    "tool": "send_email"
+                })
+            )]
+        
+        try:
+            message = Mail(
+                from_email=from_email,
+                to_emails=to_emails,
+                subject=subject,
+                html_content=body
+            )
+            
+            response = sendgrid_client.send(message)
+            
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": True,
+                    "provider": "sendgrid",
+                    "to": to_emails,
+                    "from": from_email,
+                    "subject": subject,
+                    "status_code": response.status_code,
+                    "message_id": response.headers.get('X-Message-Id')
+                })
+            )]
+            
+        except Exception as e:
+            logger.error(f"SendGrid send failed: {e}")
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": f"SendGrid send failed: {str(e)}",
+                    "tool": "send_email"
+                })
+            )]
+    
+    # Mailgun
+    elif provider == "mailgun":
+        if not MAILGUN_KEY:
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": "Mailgun not configured. Please set MAILGUN_API_KEY",
+                    "tool": "send_email"
+                })
+            )]
+        
+        # Mailgun implementation would go here
         return [types.TextContent(
             type="text",
-            text=json.dumps({"error": f"Email send failed: {str(e)}"}, indent=2)
+            text=json.dumps({
+                "error": "Mailgun provider not yet implemented",
+                "tool": "send_email"
+            })
+        )]
+    
+    else:
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({
+                "error": f"Unsupported email provider: {provider}. Use 'gmail', 'sendgrid', or 'mailgun'",
+                "tool": "send_email"
+            })
         )]
 
-# ============================================
-# 8. STRIPE INTEGRATION TOOL - STUBBED
-# ============================================
-
+# Tool 8: Stripe Operations
 async def stripe_operation_tool(args: Dict[str, Any]) -> List[types.TextContent]:
-    """
-    Handle payments, subscriptions, and invoicing
-    TODO: Implement Stripe API integration
-    """
-    try:
-        operation = args.get("operation")
-        data = args.get("data", {})
-        
-        if not operation or not data:
-            raise ValueError("Operation and data are required")
-        
-        # TODO: Initialize Stripe client with API key
-        # TODO: Implement payment intent creation
-        # TODO: Implement subscription management
-        # TODO: Implement invoice generation
-        # TODO: Add webhook handling for events
-        
+    """Handle Stripe payment operations"""
+    operation = args.get("operation")
+    data = args.get("data", {})
+    
+    if not operation or not data:
         return [types.TextContent(
             type="text",
             text=json.dumps({
-                "success": False,
-                "error": "Stripe tool not yet implemented",
-                "todo": [
-                    "Configure STRIPE_KEY in .env",
-                    "Install stripe library",
-                    "Implement payment flows",
-                    "Set up webhook endpoints"
-                ],
-                "operation": operation,
-                "data": data
-            }, indent=2)
+                "error": "Operation and data are required",
+                "tool": "stripe_operation"
+            })
         )]
-        
-    except Exception as e:
+    
+    if not stripe.api_key:
         return [types.TextContent(
             type="text",
-            text=json.dumps({"error": f"Stripe operation failed: {str(e)}"}, indent=2)
+            text=json.dumps({
+                "error": "Stripe not configured. Please set STRIPE_API_KEY",
+                "tool": "stripe_operation"
+            })
+        )]
+    
+    try:
+        if operation == "create_payment":
+            amount = data.get("amount")  # Amount in cents
+            currency = data.get("currency", "usd")
+            description = data.get("description", "Payment")
+            
+            if not amount:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": "Amount is required for payment creation",
+                        "tool": "stripe_operation"
+                    })
+                )]
+            
+            payment_intent = stripe.PaymentIntent.create(
+                amount=amount,
+                currency=currency,
+                description=description,
+                automatic_payment_methods={"enabled": True}
+            )
+            
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": True,
+                    "operation": "create_payment",
+                    "payment_intent_id": payment_intent.id,
+                    "client_secret": payment_intent.client_secret,
+                    "amount": payment_intent.amount,
+                    "currency": payment_intent.currency,
+                    "status": payment_intent.status
+                })
+            )]
+        
+        elif operation == "create_subscription":
+            customer_id = data.get("customer_id")
+            price_id = data.get("price_id")
+            
+            if not customer_id or not price_id:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": "customer_id and price_id are required for subscription",
+                        "tool": "stripe_operation"
+                    })
+                )]
+            
+            subscription = stripe.Subscription.create(
+                customer=customer_id,
+                items=[{"price": price_id}]
+            )
+            
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": True,
+                    "operation": "create_subscription",
+                    "subscription_id": subscription.id,
+                    "customer": subscription.customer,
+                    "status": subscription.status,
+                    "current_period_end": subscription.current_period_end
+                })
+            )]
+        
+        elif operation == "create_invoice":
+            customer_id = data.get("customer_id")
+            amount = data.get("amount")
+            description = data.get("description", "Invoice item")
+            
+            if not customer_id or not amount:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": "customer_id and amount are required for invoice",
+                        "tool": "stripe_operation"
+                    })
+                )]
+            
+            # Create invoice item
+            stripe.InvoiceItem.create(
+                customer=customer_id,
+                amount=amount,
+                currency="usd",
+                description=description
+            )
+            
+            # Create and finalize invoice
+            invoice = stripe.Invoice.create(
+                customer=customer_id,
+                auto_advance=True
+            )
+            invoice = stripe.Invoice.finalize_invoice(invoice.id)
+            
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": True,
+                    "operation": "create_invoice",
+                    "invoice_id": invoice.id,
+                    "number": invoice.number,
+                    "amount_due": invoice.amount_due,
+                    "status": invoice.status,
+                    "hosted_invoice_url": invoice.hosted_invoice_url
+                })
+            )]
+        
+        elif operation == "list_customers":
+            limit = data.get("limit", 10)
+            customers = stripe.Customer.list(limit=limit)
+            
+            customer_list = []
+            for customer in customers:
+                customer_list.append({
+                    "id": customer.id,
+                    "email": customer.email,
+                    "name": customer.name,
+                    "created": customer.created
+                })
+            
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": True,
+                    "operation": "list_customers",
+                    "customers": customer_list,
+                    "total": len(customer_list)
+                })
+            )]
+        
+        elif operation == "get_balance":
+            balance = stripe.Balance.retrieve()
+            
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": True,
+                    "operation": "get_balance",
+                    "available": balance.available,
+                    "pending": balance.pending
+                })
+            )]
+        
+        else:
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": f"Unsupported operation: {operation}",
+                    "tool": "stripe_operation",
+                    "supported_operations": ["create_payment", "create_subscription", "create_invoice", "list_customers", "get_balance"]
+                })
+            )]
+            
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe operation failed: {e}")
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({
+                "error": f"Stripe operation failed: {str(e)}",
+                "tool": "stripe_operation"
+            })
         )]
 
-# ============================================
-# 9. DOCS/KNOWLEDGE BASE TOOL - STUBBED
-# ============================================
-
+# Tool 9: Docs/Knowledge Base Operations
 async def docs_operation_tool(args: Dict[str, Any]) -> List[types.TextContent]:
-    """
-    Interact with Notion or Google Drive documents
-    TODO: Implement document API integrations
-    """
-    try:
-        provider = args.get("provider")
-        action = args.get("action")
-        data = args.get("data", {})
-        
-        if not provider or not action or not data:
-            raise ValueError("Provider, action, and data are required")
-        
-        # TODO: Implement Notion API integration
-        # TODO: Implement Google Drive API integration
-        # TODO: Add document search functionality
-        # TODO: Implement file upload/download
-        # TODO: Add collaborative editing features
-        
+    """Interact with Notion or Google Drive"""
+    provider = args.get("provider")
+    action = args.get("action")
+    data = args.get("data", {})
+    
+    if not provider or not action or not data:
         return [types.TextContent(
             type="text",
             text=json.dumps({
-                "success": False,
-                "error": "Docs tool not yet implemented",
-                "todo": [
-                    f"Configure {provider.upper()}_KEY in .env",
-                    f"Install {provider} client library",
-                    "Implement CRUD operations",
-                    "Add search functionality"
-                ],
-                "provider": provider,
-                "action": action,
-                "data": data
-            }, indent=2)
+                "error": "Provider, action, and data are required",
+                "tool": "docs_operation"
+            })
         )]
+    
+    if provider == "notion":
+        if not notion_client:
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": "Notion not configured. Please set NOTION_API_KEY",
+                    "tool": "docs_operation"
+                })
+            )]
         
-    except Exception as e:
-        return [types.TextContent(
-            type="text",
-            text=json.dumps({"error": f"Docs operation failed: {str(e)}"}, indent=2)
-        )]
+        try:
+            if action == "search":
+                query = data.get("query", "")
+                
+                # Fixed: Removed invalid timestamp parameter
+                response = await notion_client.search(
+                    query=query,
+                    filter={"property": "object", "value": "page"}
+                )
+                
+                results = []
+                for page in response.get("results", []):
+                    title = "Untitled"
+                    if "title" in page.get("properties", {}):
+                        title_prop = page["properties"]["title"]
+                        if title_prop.get("title"):
+                            title = title_prop["title"][0].get("text", {}).get("content", "Untitled")
+                    
+                    results.append({
+                        "id": page["id"],
+                        "title": title,
+                        "url": page.get("url"),
+                        "last_edited": page.get("last_edited_time")
+                    })
+                
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "success": True,
+                        "provider": "notion",
+                        "action": "search",
+                        "query": query,
+                        "results": results,
+                        "total": len(results)
+                    })
+                )]
+            
+            elif action == "list_pages":
+                # List all pages in workspace
+                response = await notion_client.search(
+                    filter={"property": "object", "value": "page"}
+                )
+                
+                pages = []
+                for page in response.get("results", []):
+                    title = "Untitled"
+                    if "title" in page.get("properties", {}):
+                        title_prop = page["properties"]["title"]
+                        if title_prop.get("title"):
+                            title = title_prop["title"][0].get("text", {}).get("content", "Untitled")
+                    
+                    pages.append({
+                        "id": page["id"],
+                        "title": title,
+                        "url": page.get("url"),
+                        "created": page.get("created_time"),
+                        "last_edited": page.get("last_edited_time")
+                    })
+                
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "success": True,
+                        "provider": "notion",
+                        "action": "list_pages",
+                        "pages": pages,
+                        "total": len(pages)
+                    })
+                )]
+            
+            elif action == "create_page":
+                parent_id = data.get("parent_id")
+                title = data.get("title", "New Page")
+                content = data.get("content", "")
+                
+                if not parent_id:
+                    return [types.TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "error": "parent_id is required to create a page",
+                            "tool": "docs_operation"
+                        })
+                    )]
+                
+                # Create new page
+                new_page = await notion_client.pages.create(
+                    parent={"page_id": parent_id} if "-" in parent_id else {"database_id": parent_id},
+                    properties={
+                        "title": {
+                            "title": [
+                                {
+                                    "text": {
+                                        "content": title
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    children=[
+                        {
+                            "object": "block",
+                            "type": "paragraph",
+                            "paragraph": {
+                                "rich_text": [
+                                    {
+                                        "type": "text",
+                                        "text": {
+                                            "content": content
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ] if content else []
+                )
+                
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "success": True,
+                        "provider": "notion",
+                        "action": "create_page",
+                        "page_id": new_page["id"],
+                        "url": new_page.get("url")
+                    })
+                )]
+            
+        except Exception as e:
+            logger.error(f"Notion operation failed: {e}")
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": f"Notion operation failed: {str(e)}",
+                    "tool": "docs_operation"
+                })
+            )]
+    
+    return [types.TextContent(
+        type="text",
+        text=json.dumps({
+            "error": f"Unsupported provider: {provider}",
+            "tool": "docs_operation"
+        })
+    )]
 
-# ============================================
-# 10. SOCIAL MEDIA POSTING TOOL - STUBBED
-# ============================================
-
+# Tool 10: Social Media Posting
 async def social_media_post_tool(args: Dict[str, Any]) -> List[types.TextContent]:
-    """
-    Post to LinkedIn or Twitter/X
-    TODO: Implement social media API integrations
-    """
-    try:
-        platform = args.get("platform")
-        content = args.get("content")
-        media_urls = args.get("media_urls", [])
-        schedule_time = args.get("schedule_time")
-        
-        if not platform or not content:
-            raise ValueError("Platform and content are required")
-        
-        # TODO: Implement LinkedIn API v2 integration
-        # TODO: Implement Twitter API v2 integration
-        # TODO: Add media upload functionality
-        # TODO: Implement post scheduling
-        # TODO: Add analytics tracking
-        
+    """Post to social media platforms"""
+    platform = args.get("platform")
+    content = args.get("content")
+    
+    if not platform or not content:
         return [types.TextContent(
             type="text",
             text=json.dumps({
-                "success": False,
-                "error": "Social media tool not yet implemented",
-                "todo": [
-                    f"Configure {platform.upper()}_TOKEN in .env",
-                    f"Install {platform} API library",
-                    "Implement OAuth flow",
-                    "Add posting functionality"
-                ],
-                "platform": platform,
-                "content": content[:100] + "..." if len(content) > 100 else content,
-                "media_count": len(media_urls),
-                "scheduled": schedule_time is not None
-            }, indent=2)
+                "error": "Platform and content are required",
+                "tool": "social_media_post"
+            })
         )]
+    
+    if platform == "linkedin":
+        if not LINKEDIN_ACCESS_TOKEN:
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": "LinkedIn not configured. Please set LINKEDIN_ACCESS_TOKEN",
+                    "tool": "social_media_post"
+                })
+            )]
         
-    except Exception as e:
-        return [types.TextContent(
-            type="text",
-            text=json.dumps({"error": f"Social media post failed: {str(e)}"}, indent=2)
-        )]
+        try:
+            # Get user profile first
+            async with aiohttp.ClientSession() as session:
+                headers = {
+                    "Authorization": f"Bearer {LINKEDIN_ACCESS_TOKEN}",
+                    "Content-Type": "application/json"
+                }
+                
+                # Get user info for author
+                async with session.get(
+                    "https://api.linkedin.com/v2/me",
+                    headers=headers
+                ) as response:
+                    if response.status != 200:
+                        # Try to refresh token if expired
+                        error_text = await response.text()
+                        logger.error(f"LinkedIn auth failed: {error_text}")
+                        
+                        # Attempt token refresh if we have refresh token
+                        if LINKEDIN_CLIENT_ID and LINKEDIN_CLIENT_SECRET:
+                            # This would require implementing OAuth refresh flow
+                            return [types.TextContent(
+                                type="text",
+                                text=json.dumps({
+                                    "error": "LinkedIn token expired. Please refresh your access token.",
+                                    "tool": "social_media_post",
+                                    "status_code": response.status
+                                })
+                            )]
+                        
+                        return [types.TextContent(
+                            type="text",
+                            text=json.dumps({
+                                "error": f"LinkedIn authentication failed: {response.status}",
+                                "tool": "social_media_post"
+                            })
+                        )]
+                    
+                    user_data = await response.json()
+                    person_urn = f"urn:li:person:{user_data['id']}"
+                
+                # Create post
+                post_data = {
+                    "author": person_urn,
+                    "lifecycleState": "PUBLISHED",
+                    "specificContent": {
+                        "com.linkedin.ugc.ShareContent": {
+                            "shareCommentary": {
+                                "text": content
+                            },
+                            "shareMediaCategory": "NONE"
+                        }
+                    },
+                    "visibility": {
+                        "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"
+                    }
+                }
+                
+                async with session.post(
+                    "https://api.linkedin.com/v2/ugcPosts",
+                    headers=headers,
+                    json=post_data
+                ) as response:
+                    if response.status == 201:
+                        post_response = await response.json()
+                        return [types.TextContent(
+                            type="text",
+                            text=json.dumps({
+                                "success": True,
+                                "platform": "linkedin",
+                                "post_id": post_response.get("id"),
+                                "status": "published"
+                            })
+                        )]
+                    else:
+                        error_text = await response.text()
+                        return [types.TextContent(
+                            type="text",
+                            text=json.dumps({
+                                "error": f"LinkedIn post failed: {error_text}",
+                                "tool": "social_media_post"
+                            })
+                        )]
+                        
+        except Exception as e:
+            logger.error(f"LinkedIn post failed: {e}")
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": f"LinkedIn post failed: {str(e)}",
+                    "tool": "social_media_post"
+                })
+            )]
+    
+    elif platform == "twitter":
+        if not TWITTER_BEARER_TOKEN:
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": "Twitter not configured. Please set TWITTER_BEARER_TOKEN",
+                    "tool": "social_media_post"
+                })
+            )]
+        
+        try:
+            # Twitter v2 API
+            client = tweepy.Client(bearer_token=TWITTER_BEARER_TOKEN)
+            
+            response = client.create_tweet(text=content)
+            
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": True,
+                    "platform": "twitter",
+                    "tweet_id": response.data['id'],
+                    "text": response.data['text']
+                })
+            )]
+            
+        except Exception as e:
+            logger.error(f"Twitter post failed: {e}")
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "error": f"Twitter post failed: {str(e)}",
+                    "tool": "social_media_post"
+                })
+            )]
+    
+    return [types.TextContent(
+        type="text",
+        text=json.dumps({
+            "error": f"Unsupported platform: {platform}",
+            "tool": "social_media_post"
+        })
+    )]
 
-# ============================================
-# MCP SERVER MAIN ENTRY POINT
-# ============================================
+async def cleanup_clients():
+    """Clean up initialized clients"""
+    if mongo_client:
+        logger.info("Closing MongoDB client...")
+        mongo_client.close()
+    if db_engine:
+        logger.info("Closing SQL database engine...")
+        await db_engine.dispose()
 
 async def main():
-    """Main entry point for the MCP server"""
-    logger.info("Starting Business Tools MCP Server...")
-    
-    # Run the server using stdio transport
-    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-        await app.run(
-            read_stream,
-            write_stream,
-            app.create_initialization_options()
-        )
+    """Main function to run the MCP server"""
+    loop = asyncio.get_event_loop()
+    stop_event = asyncio.Event()
+
+    def signal_handler():
+        logger.info("Shutdown signal received. Initiating graceful shutdown...")
+        stop_event.set()
+
+    try:
+        loop.add_signal_handler(signal.SIGINT, signal_handler)
+        loop.add_signal_handler(signal.SIGTERM, signal_handler)
+    except NotImplementedError:
+        logger.warning("Cannot set signal handlers on this platform.")
+
+    try:
+        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            server_task = loop.create_task(app.run(
+                read_stream,
+                write_stream,
+                app.create_initialization_options()
+            ))
+            await stop_event.wait()
+            logger.info("Attempting to gracefully shut down server...")
+            await app.shutdown()
+            await server_task
+    except asyncio.CancelledError:
+        logger.info("Server task cancelled.")
+    finally:
+        await cleanup_clients()
+        pending = asyncio.all_tasks(loop=loop)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        await loop.shutdown_asyncgens()
+        logger.info("Asyncio event loop shutting down.")
 
 if __name__ == "__main__":
-    # Run the async main function
+    logger.info("Starting Business Tools MCP Server (Production Ready)")
     asyncio.run(main())

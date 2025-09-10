@@ -1,66 +1,19 @@
-# Core MCP Server Dependencies
-mcp>=0.1.0
-python-dotenv>=1.0.0
-aiohttp>=3.9.0
-
-# LLM Provider Libraries (install as needed)
-openai>=1.0.0  # For OpenAI GPT integration
-google-generativeai>=0.3.0  # For Google Gemini
-anthropic>=0.18.0  # For Claude
-requests>=2.31.0  # For local Llama3/Ollama
-
-# Business Tool Dependencies
-
-# Web Search
-# serpapi>=0.1.5  # Uncomment if using SerpAPI
-
-# Database
-sqlalchemy>=2.0.0
-psycopg2-binary>=2.9.0  # PostgreSQL
-pymysql>=1.1.0  # MySQL
-# sqlite3 is built-in
-
-# CRM Integration
-hubspot-api-client>=12.0.0
-simple-salesforce>=1.12.0
-
-# Data Enrichment
-# clearbit>=0.1.7  # Uncomment if using Clearbit
-# peopledatalabs>=3.0.0  # Uncomment if using People Data Labs
-
-# Calendar & Appointments
-google-api-python-client>=2.100.0
-google-auth>=2.23.0
-google-auth-oauthlib>=1.1.0
-O365>=2.0.0  # For Outlook/Office365
-
-# Communication
-twilio>=8.10.0
-
-# Email Services
-sendgrid>=6.11.0
-# mailgun>=0.1.0  # Uncomment if using Mailgun
-
-# Payments
-stripe>=7.0.0
-
-# Docs/Knowledge Base
-notion-client>=2.0.0
-# google-api-python-client already included above
-
-# Social Media
-# python-linkedin-v2>=0.9.4  # Uncomment if using LinkedIn
-tweepy>=4.14.0  # For Twitter/X
-
-# Utilities
-pydantic>=2.0.0  # For data validation
-httpx>=0.25.0  # Alternative to aiohttp
-python-dateutil>=2.8.0
-pytz>=2023.3
-
-# Development & Testing (optional)
-pytest>=7.4.0
-pytest-asyncio>=0.21.0
-black>=23.0.0
-flake8>=6.1.0
-mypy>=1.7.0
+mcp
+aiohttp
+sqlalchemy[asyncio]
+asyncpg  # For PostgreSQL
+aiomysql  # For MySQL
+stripe
+pymongo
+twilio
+sendgrid
+hubspot-api-client
+simple-salesforce
+notion-client
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
+O365
+tweepy
+python-dotenv
