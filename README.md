@@ -86,7 +86,7 @@ Edit `.env` and add your API keys:
 
 ```env
 # Database
-DATABASE_URL=mongodb+srv://username:password@cluster.mongodb.net/dbname
+DATABASE_URL=mongodb+srv://your_username:your_password@your_cluster.mongodb.net/your_database
 
 # Web Search
 SERPAPI_KEY=your_serpapi_key_here
@@ -106,7 +106,7 @@ GOOGLE_CALENDAR_CREDENTIALS=credentials.json
 GOOGLE_CALENDAR_TOKEN=google_calendar_token.pickle
 
 # Communication (Twilio)
-TWILIO_SID=your_twilio_sid
+TWILIO_ACCOUNT_SID=your_twilio_account_sid
 TWILIO_AUTH_TOKEN=your_twilio_auth_token
 TWILIO_PHONE_NUMBER=+1234567890
 TWILIO_WHATSAPP_NUMBER=whatsapp:+1234567890

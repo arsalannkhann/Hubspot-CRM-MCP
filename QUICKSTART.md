@@ -47,7 +47,7 @@ GMAIL_EMAIL_ADDRESS=your.email@gmail.com
 GMAIL_APP_PASSWORD=your_app_password_here
 
 # Option 3: Twilio SMS
-TWILIO_SID=your_sid_here
+TWILIO_ACCOUNT_SID=your_account_sid_here
 TWILIO_AUTH_TOKEN=your_auth_token_here
 TWILIO_PHONE_NUMBER=+1234567890
 ```
