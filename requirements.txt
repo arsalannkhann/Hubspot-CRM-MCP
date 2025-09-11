@@ -17,3 +17,5 @@ google-api-python-client
 O365
 tweepy
 python-dotenv
+flask
+requests
